@@ -29,13 +29,14 @@ import tqdm
 import copy
 import lmfit as lm
 import matplotlib.pyplot as plt
+from matplotlib.patches import Circle
 
 #%% define some golbal flags
 debugging=True
 debugging_figures={'AcceptanceDiagram':False,
                    'Peakfinding':False,
                    'Monitor':False}
-
+debugging_dettube=150
 #%% define the main class
 class Reduction:
     '''
@@ -116,22 +117,129 @@ class Reduction:
         return fully_annotated
     
     #%% acceptance diagram and helper functions to convert between lambda and tof
+    # @staticmethod
+    # def acceptanceDiagram(instparamfile,position):
+    #     instrumentdict=Reduction.get_instrument_params(instparamfile)
+    #     params={}
+    #     openingangle=[12,12,15,105]
+    #     for chop in [1,2,3,4]:
+    #         params.update({f'chopper{chop}':{'open':instrumentdict[f'chopper{chop}_phase']/360/instrumentdict[f'chopper{chop}_speed'],
+    #                                         'close':(openingangle[chop-1]+instrumentdict[f'chopper{chop}_phase'])/360/instrumentdict[f'chopper{chop}_speed'],
+    #                                         'distance':instrumentdict[f'chopper{chop}_distance']
+    #                                         }
+    #                     })
+    #     choppers = sc.DataGroup(
+    #         {name: scn.tof.chopper_cascade.Chopper(
+    #             distance=sc.scalar(param['distance'], unit='m'),
+    #             time_open=sc.array(dims=('cutout',), values=[param['open']], unit='s'),
+    #             time_close=sc.array(dims=('cutout',), values=[param['close']], unit='s')
+    #         ) for name, param in params.items()}
+    #     )
+    #     frames = scn.tof.chopper_cascade.FrameSequence.from_source_pulse(
+    #         time_min=sc.scalar(0.0, unit='ms'),
+    #         time_max=sc.scalar(4.0, unit='ms'),  # ESS pulse is 3 ms, but it has a tail
+    #         wavelength_min=sc.scalar(0.0, unit='angstrom'),
+    #         wavelength_max=sc.scalar(10.0, unit='angstrom'),
+    #     )
+    #     frames = frames.chop(choppers.values())
+    #     at_sample = frames.propagate_to(sc.scalar(instrumentdict[position], unit='m'))
+    #     if debugging:
+    #         if debugging_figures['AcceptanceDiagram']==False:
+    #             at_sample.draw()
+    #             debugging_figures['AcceptanceDiagram']=True
+    #     ac_dia=at_sample[-1].subframes[0]
+    #     return ac_dia
+
+
+    def chopper_times(phase_deg,
+        frequency_hz,
+        opening_angle_deg,
+        t_min=0.0,
+        t_max=1.0,
+        offset=0.0,
+        direction=1,
+    ):
+        """
+        Calculate chopper opening and closing times.
+
+        Parameters
+        ----------
+        phase_deg : float
+            Reference phase in degrees.
+        frequency_hz : float
+            Chopper rotation frequency.
+        opening_angle_deg : float
+            Slit opening width in degrees.
+        direction : int
+            +1 or -1
+        """
+
+        if direction not in (+1, -1):
+            raise ValueError("direction must be +1 or -1")
+
+        period = 1.0 / frequency_hz
+
+        if direction == +1:
+            open_phase = phase_deg
+            close_phase = phase_deg + opening_angle_deg
+
+        else:
+            open_phase = phase_deg - opening_angle_deg
+            close_phase = phase_deg
+
+        t_open0 = open_phase / 360.0 * period + offset
+        t_close0 = close_phase / 360.0 * period + offset
+
+        # Ensure proper ordering in time
+        if t_close0 < t_open0:
+            t_close0 += period
+
+        n_start = int(np.floor((t_min - t_close0) / period))
+        n_stop = int(np.ceil((t_max - t_open0) / period))
+
+        n = np.arange(n_start, n_stop + 1)
+
+        open_times = t_open0 + n * period
+        close_times = t_close0 + n * period
+
+        mask = (close_times >= t_min) & (open_times <= t_max)
+
+        return open_times[mask], close_times[mask]
+
     @staticmethod
     def acceptanceDiagram(instparamfile,position):
         instrumentdict=Reduction.get_instrument_params(instparamfile)
         params={}
         openingangle=[12,12,15,105]
+        plt.figure()
         for chop in [1,2,3,4]:
-            params.update({f'chopper{chop}':{'open':instrumentdict[f'chopper{chop}_phase']/360/instrumentdict[f'chopper{chop}_speed'],
-                                            'close':(openingangle[chop-1]+instrumentdict[f'chopper{chop}_phase'])/360/instrumentdict[f'chopper{chop}_speed'],
+            if chop==2:
+                direction=1
+                delta=0
+            else:
+                direction=-1      
+                delta=12
+            open,close=Reduction.chopper_times(instrumentdict[f'chopper{chop}_phase']+delta,
+                                               instrumentdict[f'chopper{chop}_speed'],
+                                               openingangle[chop-1],
+                                               direction=direction)
+            if chop==21:
+                open+=-1/224
+                close+=-1/224
+                warnings.warn("Opening and closing times of chopper 2 artificially shifted!!!!!")
+                print('openclose')
+                print(open)
+                print(close)
+            params.update({f'chopper{chop}':{'open':open,
+                                            'close':close,
                                             'distance':instrumentdict[f'chopper{chop}_distance']
                                             }
                         })
         choppers = sc.DataGroup(
             {name: scn.tof.chopper_cascade.Chopper(
                 distance=sc.scalar(param['distance'], unit='m'),
-                time_open=sc.array(dims=('cutout',), values=[param['open']], unit='s'),
-                time_close=sc.array(dims=('cutout',), values=[param['close']], unit='s')
+                time_open=sc.array(dims=('cutout',), values=param['open'], unit='s'),
+                time_close=sc.array(dims=('cutout',), values=param['close'], unit='s')
             ) for name, param in params.items()}
         )
         frames = scn.tof.chopper_cascade.FrameSequence.from_source_pulse(
@@ -146,7 +254,9 @@ class Reduction:
             if debugging_figures['AcceptanceDiagram']==False:
                 at_sample.draw()
                 debugging_figures['AcceptanceDiagram']=True
+        #print(at_sample[-1])
         ac_dia=at_sample[-1].subframes[0]
+        
         return ac_dia
 
     @staticmethod
@@ -206,6 +316,7 @@ class Reduction:
         - analyzer_focus_y: vertical position of focus
         - analyzer_radius: radius of analyzer
         """
+        print(10*'$'+'calculate detpos2theta')
         instrumentdict=Reduction.get_instrument_params(instparamfile)
         end_angle=20.43 # based on geogebra geometry
         start_angle=-np.rad2deg(np.arcsin(instrumentdict['analyzer_focus_y']/instrumentdict['analyzer_radius']))
@@ -244,10 +355,12 @@ class Reduction:
                 'vec_AnaDet':[],
                 'vec_analyzed':[],
                 'vec_Ana_Focus':[]})
+        plt.figure()
         for thet in theta:
             thet=np.deg2rad(thet)
             x=x_of_phi(thet)
             y=y_of_phi(thet)
+            plt.plot(x,y,'o')
             vec_Sample_Ana=(x,y)
             vec_Ana_Focus=(instrumentdict['analyzer_focus_x']-x,instrumentdict['analyzer_focus_y']-y)
             calcurve['angleatanalyzer'].append(float(angle_between(vec_Sample_Ana,vec_Ana_Focus)))
@@ -268,6 +381,12 @@ class Reduction:
                 calcurve['vec_AnaDet'].append(vec_AnaDet)
         dataframe=pd.DataFrame.from_dict({'detectorpos':calcurve['detectorpos'],'theta':calcurve['theta'],'flightpath':calcurve['flightpath'],'angleatanalyzer':calcurve['angleatanalyzer']})
         dataframe.to_csv("detector_angle_calibration.txt")
+        circle = Circle((0, 0.075), 2.5, fill=False)
+        circle1 = Circle((0, 0.075), 2.4, fill=False)
+        ax=plt.gca()
+        ax.set_aspect('equal')
+        ax.add_patch(circle)
+        ax.add_patch(circle1)
         return calcurve
     #%% determine kf
     @staticmethod
@@ -338,17 +457,89 @@ class Reduction:
         else:
             treatment=''
         for f in folders:
-            data=Reduction.loadevents(f+'detector_inner_list.p.th.L.t.y')
-            data=Reduction.determine_nearest_tof_peak(data)
-            data=Reduction.monitornormalization({'data': data,'treatment':treatment+'loaded from McStas'},f)
+            print(f)
+            if os.path.exists(f+'mccode.h5'):
+                data=Reduction.loadeventshdf(f+'mccode.h5')
+                data=Reduction.determine_nearest_tof_peak(data)
+                data,monitor=Reduction.monitornormalization({'data': data,'treatment':treatment+'loaded from McStas nexus'},f)
+                print('nexus file found and loaded')
+            elif os.path.exists(f+'detector_inner_list.p.th.L.t.y'):
+                data=Reduction.loadevents(f+'detector_inner_list.p.th.L.t.y')
+                data=Reduction.determine_nearest_tof_peak(data)
+                data,monitor=Reduction.monitornormalization({'data': data,'treatment':treatment+'loaded from McStas'},f)
+            else:
+                raise Exception(f'No files found in {f}')
             if merged==[]:
                 merged=data['data']
             else:
                 merged=sc.concat([merged, data['data']],dim='event')
             filename.append(f+'detector_inner_list.p.th.L.t.y')
         print("Merging", len(folders), "folder(s)")
-        data={'data': merged, 'meta': {'filename': filename},'treatment':data['treatment']}
+        data={'data': merged, 'meta': {'filename': filename},'treatment':data['treatment'],'monitor':monitor}
         return Reduction.RawData[Reduction.RunType](data)
+
+    @staticmethod
+    def loadeventshdf(filename):
+        path='/entry1/data/caen_events_list_p_U0_U1_U2_U3_U4_U5_U6_U7/events'
+        with h5py.File(filename, "r") as f:
+            if path in f:
+                kafkatube=True
+            else:
+                kafkatube=False
+        if kafkatube:
+            warnings.warn('Assuming McStas results from Miracles with detector tubes from Detector_tubes in combination with modified ReadoudCaen \n \
+                          Assuming the following entries: weight; ring; fen; time; channel; a; b; c; d\n \
+                          a and b are the voltages from the tubes\n \
+                          Assuming 150m tube length')
+            L=0.150
+            with h5py.File(filename, 'r') as f:
+                dat=np.array(f[path])
+            pos=['t','b']
+            tubes=sc.array(dims=['event'], values=dat[:,4])
+            height=sc.array(dims=['event'],values=L*(0.5+(dat[:,5]-dat[:,6])/(dat[:,5]+dat[:,6])),unit='m')
+            tof=sc.array(dims=['event'],values=dat[:,3],unit='s')
+            weights = sc.array(dims=['event'], unit='counts', values=dat[:,0])
+            topbottom=sc.array(dims=['event'], values=[pos[int(tb-1)] for tb in dat[:,2]])
+        else:
+            warnings.warn('Assuming McStas results from Miracles with detector tubes from monitornd \n Assuming the following entries: Intensity Wavelength Time_Of_Flight Position')
+            tube=np.array([])
+            tb=[]
+            data=np.array([])
+            for hi in range(1,49):
+                for pos in ['t','b']:
+                    try:
+                        with h5py.File(filename, 'r') as f:
+                            dat = np.array(f[f'/entry1/data/tube{hi}t_list_p_L_t_y/events'])
+                            if dat.shape==(4,):
+                                dat=np.array([dat])
+                    except:
+                        print('no data loaded for ',hi,pos)
+                        dat=np.array([])
+                    if dat.shape==(0,):
+                        pass
+                    elif data.shape==(0,):
+                        data=dat
+                    else:
+                        data=np.concatenate((data, dat), axis=0)
+                    tube=np.append(tube,np.ones(dat.shape[0])*hi)
+                    #print(f'overall events: {tube.shape}')
+                    tb+=dat.shape[0]*[pos]
+            tubes=sc.array(dims=['event'], values=tube)
+            height=sc.array(dims=['event'],values=data[:,3],unit='m')
+            tof=sc.array(dims=['event'],values=data[:,2],unit='s')
+            weights = sc.array(dims=['event'], unit='counts', values=data[:,0])
+            topbottom=sc.array(dims=['event'], values=tb)
+        usepoisson=False
+        if usepoisson:
+            idc=Reduction.detect_event_indices_poisson(weights.values)
+            vals=np.ones(data[:,0].shape)[idc]
+        else:
+            idc=np.arange(len(weights.values))
+            vals=weights.values
+        print(f'neutrons reduced from {tubes.shape} events to {vals.shape} events')
+        counts=sc.DataArray(data=sc.array(dims=['event'], unit='counts', values=vals), coords={'tof': tof[idc],'height':height[idc],'tube':tubes[idc],'topbottom':topbottom[idc]})
+        print(counts)
+        return counts
 
     @staticmethod
     def findplateau(x, y, tol, n=3):
@@ -412,6 +603,10 @@ class Reduction:
         y=scaling*Reduction.sigmoid(x,b1,c1)*(1-Reduction.sigmoid(x,b2,c2))
         return y
 
+    def beamtof3sig(x,s1,b1,c1,s2,b2,c2,b3,c3):
+        y=s1*Reduction.sigmoid(x,b1,c1)*(1-s2*Reduction.sigmoid(x,b2,c2))*(1-Reduction.sigmoid(x,b3,c3))
+        return y
+
     def savehdf(data, filename):
         """
         Saves each entry of a dictionary to a temporary HDF5 file, then merges to final file.
@@ -473,19 +668,42 @@ class Reduction:
                     result[key] = v
         return result
 
+
     @staticmethod
-    def monitorTOF(monitorname,center,eps=0.025,threshold=1e6):
-        model=lm.Model(Reduction.beamtof)
-        params=lm.Parameters()
-        params.add('b1',min=0,value=5e-3)
-        params.add('b2',min=0,value=5e-3)
-        params.add('c2',value=center)
-        params.add('deltac',min=0,value=0.01)
-        params.add('c1',expr='c2-deltac')
-        params.add('scaling',min=0,value=7e7)
-        df=pd.read_csv(monitorname,sep=' ',comment='#',header=None)
-        x=df[0].values/1e6
-        y=df[1].values
+    def monitorTOF(monitorname,center,eps=0.015,threshold=1e5,model='beamtof3sig'):
+        if model=='beamtof3sig':
+            model=lm.Model(Reduction.beamtof3sig)
+            params=lm.Parameters()
+            params.add('b1',min=0,value=5e-3)
+            params.add('b2',min=0,value=5e-3)
+            params.add('b3',min=0,value=5e-3)
+            params.add('c3',min=0,value=center+eps)
+            params.add('c2',min=0,value=center)
+            params.add('c1',min=0,value=center-eps)
+            params.add('s1',min=0,value=1e5)
+            params.add('s2',min=0,max=1,value=0.5)
+        else:
+            model=lm.Model(Reduction.beamtof)
+            params=lm.Parameters()
+            params.add('b1',min=0,value=5e-3)
+            params.add('b2',min=0,value=5e-3)
+            params.add('c2',value=center)
+            params.add('deltac',min=0,value=0.01)
+            params.add('c1',expr='c2-deltac')
+            params.add('scaling',min=0,value=7e7)
+        if os.path.exists(monitorname):
+            df=pd.read_csv(monitorname,sep=' ',comment='#',header=None)
+            x=df[0].values/1e6
+            y=df[1].values
+            print('Monitor from .dat file loaded!')
+        elif os.path.exists(monitorname.replace('tof_BGAS.dat','mccode.h5')):
+            with h5py.File(monitorname.replace('tof_BGAS.dat','mccode.h5'), 'r') as f:
+                x = np.array(f['/entry1/data/tof_BGAS_dat/Time_of_flight___gms_'])/1e6
+                y = np.array(f['/entry1/data/tof_BGAS_dat/data'])
+            print('Monitor from nexus file loaded!')
+        else:
+            raise Exception('No monitor data found!')
+
         idx=np.abs(x-center+eps)<1/14/2
         fit=model.fit(y[idx],params=params,x=x[idx])
         # 1. Smooth
@@ -495,6 +713,9 @@ class Reduction:
         minima_idx=minima_idx[y[minima_idx]>threshold]
         tofmins=x[minima_idx]
         tofmindiff=np.mean(np.abs(np.diff(tofmins)))
+        #print(tofmins)
+        if len(tofmins)==0:
+            tofmins=[0]
         try:
             tmin=max(tofmins[tofmins<center])
         except:
@@ -509,6 +730,7 @@ class Reduction:
                 plt.plot(x,y)
                 plt.plot(x[idx],y[idx])
                 plt.plot(x,fit.eval(x=x))
+                plt.plot(x[idx],fit.init_fit)
                 plt.plot(2*[center-eps],[0,max(y)])
                 plt.plot(x[minima_idx],y[minima_idx],'v')
                 plt.title('monitor fit')
@@ -517,7 +739,82 @@ class Reduction:
                 plt.savefig('Monitorfit.pdf')
                 debugging_figures['Monitor']=True
         return fit,tmin,tmax
+
+    @staticmethod
+    def monitorTOF_load(monitorname):
+        if os.path.exists(monitorname):
+            df=pd.read_csv(monitorname,sep=' ',comment='#',header=None)
+            x=df[0].values/1e6
+            y=df[1].values
+            print('Monitor from .dat file loaded!')
+        elif os.path.exists(monitorname.replace('tof_BGAS.dat','mccode.h5')):
+            with h5py.File(monitorname.replace('tof_BGAS.dat','mccode.h5'), 'r') as f:
+                x = np.array(f['/entry1/data/tof_BGAS_dat/Time_of_flight___gms_'])/1e6
+                y = np.array(f['/entry1/data/tof_BGAS_dat/data'])
+            print('Monitor from nexus file loaded!')
+        else:
+            raise Exception('No monitor data found!')
+        return x,y
     
+    @staticmethod
+    def monitorTOF_fit(x,y,center,eps=0.015,threshold=1e5,model='beamtof3sig'):
+        if model=='beamtof3sig':
+            model=lm.Model(Reduction.beamtof3sig)
+            params=lm.Parameters()
+            params.add('b1',min=0,value=5e-3)
+            params.add('b2',min=0,value=5e-3)
+            params.add('b3',min=0,value=5e-3)
+            params.add('c3',min=0,value=center+eps)
+            params.add('c2',min=0,value=center)
+            params.add('c1',min=0,value=center-eps)
+            params.add('s1',min=0,value=1e5)
+            params.add('s2',min=0,max=1,value=0.5)
+        else:
+            model=lm.Model(Reduction.beamtof)
+            params=lm.Parameters()
+            params.add('b1',min=0,value=5e-3)
+            params.add('b2',min=0,value=5e-3)
+            params.add('c2',value=center)
+            params.add('deltac',min=0,value=0.01)
+            params.add('c1',expr='c2-deltac')
+            params.add('scaling',min=0,value=7e7)
+        idx=np.abs(x-center+eps)<1/14/2
+        fit=model.fit(y[idx],params=params,x=x[idx])
+        # 1. Smooth
+        smoothed_y = sp.signal.savgol_filter(y, window_length=600, polyorder=3)
+        # 2. Find minima
+        minima_idx, _ = sp.signal.find_peaks(-smoothed_y, distance=200, prominence=0.2)
+        minima_idx=minima_idx[y[minima_idx]>threshold]
+        tofmins=x[minima_idx]
+        tofmindiff=np.mean(np.abs(np.diff(tofmins)))
+        #print(tofmins)
+        if len(tofmins)==0:
+            tofmins=[0]
+        try:
+            tmin=max(tofmins[tofmins<center])
+        except:
+            tmin=min(tofmins)-tofmindiff
+        try:
+            tmax=min(tofmins[tofmins>center])
+        except:
+            tmax=max(tofmins)+tofmindiff
+        if debugging:
+            if not debugging_figures['Monitor']:
+                plt.figure()
+                plt.plot(x,y)
+                plt.plot(x[idx],y[idx])
+                plt.plot(x,fit.eval(x=x))
+                plt.plot(x[idx],fit.init_fit)
+                plt.plot(2*[center-eps],[0,max(y)])
+                plt.plot(x[minima_idx],y[minima_idx],'v')
+                plt.title('monitor fit')
+                plt.xlabel('time [s]')
+                plt.show()
+                plt.savefig('Monitorfit.pdf')
+                debugging_figures['Monitor']=True
+        return fit,tmin,tmax
+
+
     @staticmethod
     def determine_nearest_tof_peak(rawdata):
         x=rawdata.coords['tof'].values
@@ -542,46 +839,56 @@ class Reduction:
 
     @staticmethod
     def monitornormalization(data,monitor):
-        if debugging: print(5*'#'+'monitornormalization')
+        if debugging: print(5*'#'+'save monitornormalization values')
         centers=np.unique(data['data'].coords['tofpeakcenters'].values)
         area=[]
         time_min=[]
         time_max=[]
+        print(f'detected centers: {centers}')
+        monitorparams={}
+        x,y=Reduction.monitorTOF_load(monitor+'tof_BGAS.dat')
         for center in centers:
-            monitorfit,tmin,tmax=Reduction.monitorTOF(monitor+'tof_BGAS.dat',center)
+            monitormodel='beamtof3sig'
+            monitorfit,tmin,tmax=Reduction.monitorTOF_fit(x,y,center,model=monitormodel)
             p = monitorfit.params
-            scaling = p['scaling'].value
             b1      = p['b1'].value
             c1      = p['c1'].value
             b2      = p['b2'].value
             c2      = p['c2'].value
             time_min.append(tmin)
             time_max.append(tmax)
+            if monitormodel=='beamtof3sig':
+                b3      = p['b3'].value
+                c3      = p['c3'].value
+                s1 = p['s1'].value
+                s2 = p['s2'].value
+                area_quad, abs_err = sp.integrate.quad(
+                    lambda x: Reduction.beamtof3sig(x, s1, b1, c1, s2,b2, c2,b3,c3),
+                    -np.inf, np.inf, epsabs=1e-8, epsrel=1e-8
+                )
+                fitparams=[s1, b1, c1, s2,b2, c2,b3,c3]
             # integrate with scipy.quad (can use infinite bounds) ---
             # choose bounds; -inf..inf is often fine for logistic-like pulses
-            area_quad, abs_err = sp.integrate.quad(
-                lambda x: Reduction.beamtof(x, scaling, b1, c1, b2, c2),
-                -np.inf, np.inf, epsabs=1e-8, epsrel=1e-8
-            )
-            area.append(area_quad)
-        area=np.array(area)
+            else:
+                scaling = p['scaling'].value
+                area_quad, abs_err = sp.integrate.quad(
+                    lambda x: Reduction.beamtof(x, scaling, b1, c1, b2, c2),
+                    -np.inf, np.inf, epsabs=1e-8, epsrel=1e-8
+                )
+                fitparams=[scaling, b1, c1, b2, c2]
+            monitorparams.update({f'center{center}':{'Area':area_quad,
+                                                     'fitparams':fitparams}})
         centers=np.array(centers)
         time_min=np.array(time_min)
         time_max=np.array(time_max)
         for hi,tofc in enumerate(data['data'].coords['tofpeakcenters'].values):
-            if  data['data'].coords['tof'].values[hi]<time_min[centers==data['data'].coords['tofpeakcenters'].values[hi]]:
+            if  data['data'].coords['tof'].values[hi]<time_min[centers==tofc]:
                 data['data'].coords['tof'].values[hi]=0
-            elif data['data'].coords['tof'].values[hi]>time_max[centers==data['data'].coords['tofpeakcenters'].values[hi]]:
+            elif data['data'].coords['tof'].values[hi]>time_max[centers==tofc]:
                 data['data'].coords['tof'].values[hi]=0
-        print('start normcalc')
-        for hi,nv in enumerate(data['data'].coords['tofpeakcenters'].values):
-            #print(area[centers==nv])
-            data['data'].values[hi]/=area[centers==nv]
-        #normvalue=[area[centers==tpc] for tpc in data['data'].coords['tofpeakcenters'].values]
-        print(f'end normcalc {area}')
-        data['treatment']+='; monitor normalization'
-        # TODO treat errors
-        return data
+        data['treatment']+='; monitor normalization value saved'
+        return data,monitorparams
+    
 
     @staticmethod
     def loadevents(filename):
@@ -706,11 +1013,22 @@ class Reduction:
                     kfv,tof=Reduction.determine_kf_flighttime(detheight/1000,tube,instparamfile)
                     detectorvalues[tube,detheight]=(kfv,tof)
             np.save(filename, detectorvalues)
+        
         tubecoord=raw_data['data'].coords['tube'].values.astype(int)
         tubecoord[tubecoord>tubes]=tubes+1
         pixelcoord=np.abs(raw_data['data'].coords['height'].values*1e3).astype(int)
         pixelcoord[pixelcoord>height]=height+1
         fill_value=((np.nan,np.nan,np.nan),np.nan)
+        if debugging:
+            print(5*'#'+f'artificially coarsening the detector tube to a resolution of {debugging_dettube} bin(s)')
+            #debugging_dettube is number of detector bins
+            # find now the centers of the bins
+            delta=150/(2*debugging_dettube)
+            binedges=np.linspace(delta,150-delta,debugging_dettube)
+            pxcs=[]
+            for pc in pixelcoord:
+                pxcs.append(binedges[np.abs(binedges-pc).argmin()])
+            pixelcoord=np.int32(pxcs)
         kf_tof=detectorvalues[np.abs(tubecoord),pixelcoord]
         mask=tubecoord<0
         replacement = np.empty(np.count_nonzero(mask), dtype=object)

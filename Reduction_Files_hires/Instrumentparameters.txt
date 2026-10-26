@@ -10,17 +10,8 @@ ana_crystal:'Si111'
 ##:'##'
 monitorPWD:100
 monitorBGAS:100
-chopper1_phase:70.056
-chopper1_speed:14
 chopper1_distance:7.7
-chopper2_phase:70.056
-chopper2_speed:14
 chopper2_distance:7.75
-chopper3_phase:74.088
-chopper3_speed:14
 chopper3_distance:8.3
-chopper4_phase:443.52
-chopper4_speed:14
 chopper4_distance:54.5
 sample_distance:162.5
-
