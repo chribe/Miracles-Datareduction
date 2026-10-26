@@ -115,40 +115,6 @@ class Reduction:
                 fully_annotated.append(method)  # append the actual function handle
 
         return fully_annotated
-    
-    #%% acceptance diagram and helper functions to convert between lambda and tof
-    # @staticmethod
-    # def acceptanceDiagram(instparamfile,position):
-    #     instrumentdict=Reduction.get_instrument_params(instparamfile)
-    #     params={}
-    #     openingangle=[12,12,15,105]
-    #     for chop in [1,2,3,4]:
-    #         params.update({f'chopper{chop}':{'open':instrumentdict[f'chopper{chop}_phase']/360/instrumentdict[f'chopper{chop}_speed'],
-    #                                         'close':(openingangle[chop-1]+instrumentdict[f'chopper{chop}_phase'])/360/instrumentdict[f'chopper{chop}_speed'],
-    #                                         'distance':instrumentdict[f'chopper{chop}_distance']
-    #                                         }
-    #                     })
-    #     choppers = sc.DataGroup(
-    #         {name: scn.tof.chopper_cascade.Chopper(
-    #             distance=sc.scalar(param['distance'], unit='m'),
-    #             time_open=sc.array(dims=('cutout',), values=[param['open']], unit='s'),
-    #             time_close=sc.array(dims=('cutout',), values=[param['close']], unit='s')
-    #         ) for name, param in params.items()}
-    #     )
-    #     frames = scn.tof.chopper_cascade.FrameSequence.from_source_pulse(
-    #         time_min=sc.scalar(0.0, unit='ms'),
-    #         time_max=sc.scalar(4.0, unit='ms'),  # ESS pulse is 3 ms, but it has a tail
-    #         wavelength_min=sc.scalar(0.0, unit='angstrom'),
-    #         wavelength_max=sc.scalar(10.0, unit='angstrom'),
-    #     )
-    #     frames = frames.chop(choppers.values())
-    #     at_sample = frames.propagate_to(sc.scalar(instrumentdict[position], unit='m'))
-    #     if debugging:
-    #         if debugging_figures['AcceptanceDiagram']==False:
-    #             at_sample.draw()
-    #             debugging_figures['AcceptanceDiagram']=True
-    #     ac_dia=at_sample[-1].subframes[0]
-    #     return ac_dia
 
 
     def chopper_times(phase_deg,
@@ -207,32 +173,26 @@ class Reduction:
         return open_times[mask], close_times[mask]
 
     @staticmethod
-    def acceptanceDiagram(instparamfile,position):
+    def acceptanceDiagram(instparamfile,position,chopper):
         instrumentdict=Reduction.get_instrument_params(instparamfile)
         params={}
         openingangle=[12,12,15,105]
         plt.figure()
-        for chop in [1,2,3,4]:
-            if chop==2:
-                direction=1
-                delta=0
-            else:
-                direction=-1      
+        for chop in range(4):
+            
+            if chop==1:
+                direction=-1
                 delta=12
-            open,close=Reduction.chopper_times(instrumentdict[f'chopper{chop}_phase']+delta,
-                                               instrumentdict[f'chopper{chop}_speed'],
-                                               openingangle[chop-1],
+            else:
+                direction=1      
+                delta=0
+            open,close=Reduction.chopper_times(chopper[chop]['phase']+delta,
+                                               np.abs(chopper[chop]['speed']),
+                                               openingangle[chop],
                                                direction=direction)
-            if chop==21:
-                open+=-1/224
-                close+=-1/224
-                warnings.warn("Opening and closing times of chopper 2 artificially shifted!!!!!")
-                print('openclose')
-                print(open)
-                print(close)
-            params.update({f'chopper{chop}':{'open':open,
+            params.update({f'chopper{chop+1}':{'open':open,
                                             'close':close,
-                                            'distance':instrumentdict[f'chopper{chop}_distance']
+                                            'distance':instrumentdict[f'chopper{chop+1}_distance']
                                             }
                         })
         choppers = sc.DataGroup(
@@ -463,19 +423,22 @@ class Reduction:
                 data=Reduction.determine_nearest_tof_peak(data)
                 data,monitor=Reduction.monitornormalization({'data': data,'treatment':treatment+'loaded from McStas nexus'},f)
                 print('nexus file found and loaded')
-            elif os.path.exists(f+'detector_inner_list.p.th.L.t.y'):
-                data=Reduction.loadevents(f+'detector_inner_list.p.th.L.t.y')
-                data=Reduction.determine_nearest_tof_peak(data)
-                data,monitor=Reduction.monitornormalization({'data': data,'treatment':treatment+'loaded from McStas'},f)
             else:
                 raise Exception(f'No files found in {f}')
             if merged==[]:
                 merged=data['data']
             else:
                 merged=sc.concat([merged, data['data']],dim='event')
-            filename.append(f+'detector_inner_list.p.th.L.t.y')
+            filename.append(f)
+        with h5py.File(f+'mccode.h5','r') as f:
+            chopperdata=np.array(f['/entry1/data/chopper_settings_dat/data'])
+        choppers=[]
+        for c in range(4):
+            choppers.append({'speed':chopperdata[c,0],'phase':chopperdata[c,1]})
+        print(chopperdata)
+        print(choppers)
         print("Merging", len(folders), "folder(s)")
-        data={'data': merged, 'meta': {'filename': filename},'treatment':data['treatment'],'monitor':monitor}
+        data={'data': merged, 'meta': {'filename': filename},'treatment':data['treatment'],'monitor':monitor,'choppers':choppers}
         return Reduction.RawData[Reduction.RunType](data)
 
     @staticmethod
@@ -1034,7 +997,7 @@ class Reduction:
         replacement = np.empty(np.count_nonzero(mask), dtype=object)
         replacement[:] = [fill_value] * np.count_nonzero(mask)
         # kf_tof[mask] = replacement
-        ac_dia=Reduction.acceptanceDiagram(instparamfile,'sample_distance')
+        ac_dia=Reduction.acceptanceDiagram(instparamfile,'sample_distance',raw_data['choppers'])
         for hi in tqdm.tqdm(range(len(raw_data['data'].coords['height']))):
             kfvec=kf_tof[hi][0]
             t=kf_tof[hi][1]
